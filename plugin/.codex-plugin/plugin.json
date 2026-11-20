@@ -1,0 +1,16 @@
+{
+  "name": "dragon-memory",
+  "version": "1.1.0",
+  "description": "在本机管理 Codex 的龙娘人设卡和全局记忆，并在对话中自动归档项目记录。",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "龙娘人设与记忆",
+    "shortDescription": "编辑人设卡，管理全局记忆和自动记忆开关。",
+    "longDescription": "在中文面板中管理龙娘人设和全局记忆。对话中确认的项目事项会归档到各自的项目目录。",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["打开龙娘人设与记忆管理面板。", "列出我保存的全局记忆。"],
+    "logo": "./app/icon.png",
+    "composerIcon": "./app/icon.png"
+  }
+}
