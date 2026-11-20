@@ -1,0 +1,28 @@
+# 本机 Codex 配置、人设和项目存档
+.codex/
+AGENTS.md
+AGENTS.override.md
+项目记忆.md
+memory_summary.md
+raw_memories.md
+MEMORY.md
+rollout_summaries/
+memories/
+memories_v2/
+auth.json
+config.toml
+
+# 运行时数据和缓存
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.db
+*.db-*
+*.jsonl
+*.bak
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.venv/
