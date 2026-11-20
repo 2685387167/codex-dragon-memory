@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>龙娘人设与记忆</title>
+  <style>/* DRAGON_PANEL_CSS */</style>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <span class="mark" aria-hidden="true">◇</span>
+      <h1>龙娘人设与记忆</h1>
+    </header>
+    <nav class="tabs" role="tablist" aria-label="管理功能">
+      <button id="persona-tab" role="tab" aria-selected="true" aria-controls="persona">人设卡</button>
+      <button id="memory-tab" role="tab" aria-selected="false" aria-controls="memory" tabindex="-1">全局记忆</button>
+    </nav>
+
+    <section id="persona" role="tabpanel" aria-labelledby="persona-tab">
+      <div id="persona-form" class="card">
+        <div class="card-heading">
+          <div>
+            <h2><label for="persona-text">全局人设卡</label></h2>
+            <p>保存到 Codex 全局设定，新聊天会使用更新后的内容。</p>
+          </div>
+          <code id="persona-file">AGENTS.md</code>
+        </div>
+        <textarea id="persona-text" spellcheck="false" disabled></textarea>
+        <div class="actions">
+          <button id="reload-persona" type="button" disabled>重新加载</button>
+          <button id="save-persona" type="button" class="primary" disabled>保存人设</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="memory" role="tabpanel" aria-labelledby="memory-tab" hidden>
+      <div class="card memory-settings">
+        <div>
+          <h2><label for="auto-memory">自动记忆</label></h2>
+          <p id="auto-detail">对话中确认的长期信息会自动记录。项目内容归档到各自的项目目录。</p>
+        </div>
+        <input id="auto-memory" type="checkbox" role="switch" aria-describedby="auto-detail" disabled>
+      </div>
+      <div class="memory-grid">
+        <div class="card memory-list">
+          <div class="list-header">
+            <h2>已保存的全局记忆</h2>
+            <button id="new-memory" type="button">新增</button>
+          </div>
+          <input id="memory-search" type="search" aria-label="搜索记忆" placeholder="搜索标题、正文或标签">
+          <div id="memory-rows" class="rows" aria-label="搜索结果"></div>
+        </div>
+
+        <div id="memory-form" class="card">
+          <div class="card-heading">
+            <div>
+              <h2 id="editor-title">新建记忆</h2>
+              <p id="editor-detail">填写跨项目通用的偏好或长期约定。</p>
+            </div>
+          </div>
+          <label for="memory-title">标题</label>
+          <input id="memory-title" maxlength="120" required>
+          <label for="memory-tags">标签 <span>（可选）</span></label>
+          <input id="memory-tags" maxlength="400" placeholder="例如：偏好、项目">
+          <label for="memory-body">正文</label>
+          <textarea id="memory-body" maxlength="20000" required></textarea>
+          <div class="actions">
+            <button id="delete-memory" class="danger" type="button" hidden>删除</button>
+            <button id="save-memory" class="primary" type="button" disabled>保存记忆</button>
+          </div>
+        </div>
+      </div>
+
+    </section>
+    <p id="status" role="status" aria-live="polite">正在连接本机插件…</p>
+  </main>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <div>
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-description"></p>
+      <div class="actions">
+        <button id="cancel-action" type="button" autofocus>取消</button>
+        <button id="confirm-action" type="button" class="danger"></button>
+      </div>
+    </div>
+  </dialog>
+  <script>/* DRAGON_PANEL_JS */</script>
+</body>
+</html>
