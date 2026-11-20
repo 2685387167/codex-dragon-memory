@@ -1,0 +1,12 @@
+{
+  "name": "dragon-local",
+  "interface": { "displayName": "龙娘本地插件" },
+  "plugins": [
+    {
+      "name": "dragon-memory",
+      "source": { "source": "local", "path": "./plugin" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
