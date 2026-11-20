@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dragon_memory": {
+      "command": "python",
+      "args": ["-B", "app/server.py"],
+      "cwd": "."
+    }
+  }
+}
