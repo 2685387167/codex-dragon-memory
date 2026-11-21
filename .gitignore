@@ -13,6 +13,9 @@ auth.json
 config.toml
 
 # 运行时数据和缓存
+*.log
+*.log.*
+[Ll]ogs/
 *.sqlite
 *.sqlite3
 *.sqlite-*
