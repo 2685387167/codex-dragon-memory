@@ -7,14 +7,16 @@
   <style>/* DRAGON_PANEL_CSS */</style>
 </head>
 <body>
-  <main>
+  <main data-version="DRAGON_PANEL_VERSION">
     <header class="masthead">
       <span class="mark" aria-hidden="true">◇</span>
       <h1>龙娘人设与记忆</h1>
+      <button id="update-button" type="button" aria-describedby="update-status" disabled>检查更新中…</button>
     </header>
     <nav class="tabs" role="tablist" aria-label="管理功能">
       <button id="persona-tab" role="tab" aria-selected="true" aria-controls="persona">人设卡</button>
       <button id="memory-tab" role="tab" aria-selected="false" aria-controls="memory" tabindex="-1">全局记忆</button>
+      <button id="history-tab" role="tab" aria-selected="false" aria-controls="history" tabindex="-1">更新记录</button>
     </nav>
 
     <section id="persona" role="tabpanel" aria-labelledby="persona-tab">
@@ -38,7 +40,7 @@
       <div class="card memory-settings">
         <div>
           <h2><label for="auto-memory">自动记忆</label></h2>
-          <p id="auto-detail">对话中确认的长期信息会自动记录。项目内容归档到各自的项目目录。</p>
+          <p id="auto-detail">聊天中明确表达的长期偏好可以自动保存，无需说「记住」。项目事项归档到各自的项目目录。</p>
         </div>
         <input id="auto-memory" type="checkbox" role="switch" aria-describedby="auto-detail" disabled>
       </div>
@@ -62,7 +64,7 @@
           <label for="memory-title">标题</label>
           <input id="memory-title" maxlength="120" required>
           <label for="memory-tags">标签 <span>（可选）</span></label>
-          <input id="memory-tags" maxlength="400" placeholder="例如：偏好、项目">
+          <input id="memory-tags" maxlength="400" placeholder="例如：偏好、用户固定">
           <label for="memory-body">正文</label>
           <textarea id="memory-body" maxlength="20000" required></textarea>
           <div class="actions">
@@ -73,6 +75,16 @@
       </div>
 
     </section>
+    <section id="history" role="tabpanel" aria-labelledby="history-tab" hidden>
+      <div class="card">
+        <div class="card-heading">
+          <h2>近期正式版本</h2>
+          <code id="installed-version"></code>
+        </div>
+        <div id="history-rows"><p class="empty">正在读取更新记录…</p></div>
+      </div>
+    </section>
+    <p id="update-status" role="status" aria-live="polite"></p>
     <p id="status" role="status" aria-live="polite">正在连接本机插件…</p>
   </main>
 
@@ -84,6 +96,16 @@
         <button id="cancel-action" type="button" autofocus>取消</button>
         <button id="confirm-action" type="button" class="danger"></button>
       </div>
+    </div>
+  </dialog>
+  <dialog id="update-dialog" aria-labelledby="update-title">
+    <h2 id="update-title"></h2>
+    <p id="update-versions"></p>
+    <div id="update-notes" class="release-notes" tabindex="0" aria-label="本次更新内容"></div>
+    <p id="install-status" role="status" aria-live="polite"></p>
+    <div class="actions">
+      <button id="cancel-update" type="button" autofocus>取消</button>
+      <button id="install-update" type="button" class="primary">确认更新</button>
     </div>
   </dialog>
   <script>/* DRAGON_PANEL_JS */</script>

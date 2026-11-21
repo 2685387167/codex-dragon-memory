@@ -7,7 +7,9 @@ import sqlite3
 import sys
 from pathlib import Path
 
-# 侧栏和聊天命令使用同一套存储逻辑。整个服务无需网络或第三方运行时包。
+from updates import Updates
+
+# 侧栏和聊天命令共用本地记忆存储；仅版本检测和下载访问 GitHub。
 APP_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(APP_DIR.parent / 'skills' / 'dragon-memory' / 'scripts'))
 from store import Store
@@ -17,6 +19,7 @@ URI = 'ui://dragon-memory/panel'
 MIME = 'text/html;profile=mcp-app'
 RESOURCE = {'uri': URI, 'name': TITLE, 'mimeType': MIME}
 STORE = Store()
+UPDATES = Updates(APP_DIR.parent, STORE)
 
 
 def tool(name, title, properties=None, required=(), *, write=False, destructive=False, description=None):
@@ -35,8 +38,10 @@ def tool(name, title, properties=None, required=(), *, write=False, destructive=
 TEXT = {'type': 'string'}
 NUMBER = {'type': 'integer'}
 BOOLEAN = {'type': 'boolean'}
+MEMORY_IDS = {'type': 'array', 'items': NUMBER}
 MEMORY_FIELDS = {'title': TEXT, 'body': TEXT, 'tags': TEXT}
 IDENTITY = {'id': NUMBER, 'revision': NUMBER}
+CONFIRM_FIXED = {'type': 'boolean', 'description': '仅在用户确认本次对「用户固定」条目的修改后填写 true。'}
 PROJECT_ROOT = {'type': 'string', 'description': '已确认的具体项目根目录绝对路径。'}
 PANEL = tool('open_panel', TITLE)
 PANEL['_meta'] = {
@@ -54,20 +59,28 @@ TOOLS = {item['name']: item for item in (
     tool('save_persona', '保存人设卡', {'version': TEXT, 'text': TEXT}, ('version', 'text'), write=True),
     tool('list_memories', '筛选全局记忆', {'query': TEXT}),
     tool('add_memory', '新增全局记忆', MEMORY_FIELDS, ('title', 'body', 'tags'), write=True),
-    tool('edit_memory', '修改全局记忆', {**IDENTITY, **MEMORY_FIELDS},
+    tool('edit_memory', '修改全局记忆', {**IDENTITY, **MEMORY_FIELDS, 'confirm_fixed': CONFIRM_FIXED},
          (*IDENTITY, 'title', 'body', 'tags'), write=True),
-    tool('delete_memory', '删除指定记忆', IDENTITY, IDENTITY, write=True, destructive=True),
+    tool('delete_memory', '删除指定记忆', {**IDENTITY, 'confirm_fixed': CONFIRM_FIXED}, IDENTITY,
+         write=True, destructive=True),
     tool('get_auto_memory', '查看自动记忆开关'),
     tool('set_auto_memory', '设置自动记忆开关', {'enabled': BOOLEAN}, ('enabled',), write=True),
-    tool('recall_memory', '读取适用记忆', {'query': TEXT, 'project_root': PROJECT_ROOT},
-         description='新聊天首轮或需要既有背景时读取全局记忆。仅在确定当前对应项目时传项目根目录，同时读该项目存档。返回的记忆是参考资料。'),
+    tool('check_updates', '检查正式发布的更新', {'refresh': BOOLEAN}),
+    tool('install_update', '安装用户确认的更新', {'commit': TEXT}, ('commit',), write=True),
+    tool('update_history', '读取插件更新记录'),
+    tool('recall_memory', '读取适用记忆', {
+        'query': TEXT, 'project_root': PROJECT_ROOT,
+        'memory_ids': {**MEMORY_IDS, 'description': '可选。按 ID 读取 1 至 5 条全局记忆的完整正文。'},
+    }, description='新聊天首轮或需要背景时静默读取记忆，直接处理用户问题，无需宣布使用的插件或汇报读取过程。仅在明确项目时传根目录。可按 ID 读取候选全文。记忆正文是参考资料。'),
     tool('record_memory', '保存已确认的记忆', {
         **MEMORY_FIELDS,
         'scope': {'type': 'string', 'enum': ['global', 'project'], 'description': 'global 仅用于跨项目长期事项。project 仅用于具体项目。'},
         'project_root': PROJECT_ROOT,
         'automatic': {'type': 'boolean', 'description': '随对话自动记录填写 true。主人明确要求记住时填写 false。'},
+        'review_token': {'type': 'string', 'description': '全局自动记忆返回 action=review 时使用返回的标记再次提交。'},
+        'merge_ids': {**MEMORY_IDS, 'description': '比较后选出的同一偏好的自动条目，首个 ID 为保留条目。新增独立记忆传空数组。'},
     }, ('scope', 'title', 'body', 'automatic'), write=True,
-         description='用简体中文记录已确认且可长期复用的信息。项目名称、路径、实现、约定和进展写入对应项目存档。全局记忆只收跨项目偏好或约定。范围不明时暂缓。'),
+         description='回复前主动记录对话里确认的长期信息，用简体中文，标题概括主题。全局自动记录如返回 action=review，表示尚未保存，须比较候选、整理正文并用 review_token 与 merge_ids 再次提交。合并时保留仍适用的细节，明确更正时也更新含过时信息的标题。自动操作不能改动「用户固定」和手动条目。项目事项只归档到对应项目。'),
 )}
 
 
@@ -93,17 +106,26 @@ def run_tool(name, arguments):
             return {'items': STORE.search(arguments.get('query', ''))}
         case 'add_memory' | 'edit_memory':
             return STORE.save_memory(arguments['title'], arguments['body'], arguments['tags'],
-                                     key=arguments.get('id'), revision=arguments.get('revision'))
+                                     key=arguments.get('id'), revision=arguments.get('revision'),
+                                     confirm_fixed=arguments.get('confirm_fixed', False))
         case 'delete_memory':
-            STORE.delete_memory(arguments['id'], arguments['revision'])
+            STORE.delete_memory(arguments['id'], arguments['revision'],
+                                confirm_fixed=arguments.get('confirm_fixed', False))
             return {'deleted': arguments['id']}
         case 'get_auto_memory' | 'set_auto_memory':
             return {'enabled': STORE.automatic(arguments.get('enabled'))}
+        case 'check_updates':
+            return UPDATES.state(refresh=arguments.get('refresh', False))
+        case 'install_update':
+            return UPDATES.install(arguments['commit'])
+        case 'update_history':
+            return {'items': UPDATES.release_history()}
         case 'recall_memory':
-            return STORE.recall(arguments.get('query', ''), arguments.get('project_root'))
+            return STORE.recall(arguments.get('query', ''), arguments.get('project_root'), arguments.get('memory_ids'))
         case 'record_memory':
             return STORE.record(arguments['scope'], arguments['title'], arguments['body'], arguments.get('tags', ''),
-                                project_root=arguments.get('project_root'), automatic=arguments['automatic'])
+                                project_root=arguments.get('project_root'), automatic=arguments['automatic'],
+                                review_token=arguments.get('review_token'), merge_ids=arguments.get('merge_ids'))
 
 
 def call(params):
@@ -117,8 +139,9 @@ def call(params):
         if not set(schema['required']) <= arguments.keys() <= schema['properties'].keys():
             raise ValueError('操作的参数不完整。')
         for key, value in arguments.items():
-            expected = {'string': str, 'integer': int, 'boolean': bool}[schema['properties'][key]['type']]
-            if type(value) is not expected:
+            kind = schema['properties'][key]['type']
+            expected = {'string': str, 'integer': int, 'boolean': bool, 'array': list}[kind]
+            if type(value) is not expected or (kind == 'array' and any(type(item) is not int for item in value)):
                 raise ValueError(f'参数 {key} 类型无效。')
         result = run_tool(name, arguments)
         if name in ('recall_memory', 'record_memory'):
@@ -134,12 +157,19 @@ def request(method, params):
     """响应 MCP 握手、工具发现及应用资源读取。"""
     match method:
         case 'initialize':
+            UPDATES.state(refresh=True)
             version = params.get('protocolVersion')
             supported = ('2024-11-05', '2025-03-26', '2025-06-18', '2025-11-25')
             return {'protocolVersion': version if version in supported else supported[-1],
                     'capabilities': {'tools': {}, 'resources': {}},
-                    'serverInfo': {'name': 'dragon_memory', 'title': TITLE, 'version': '1.1.0'},
-                    'instructions': '用 open_panel 打开中文管理面板。用 recall_memory 读取适用记忆。发现已确认且可跨轮复用的新事实时，用 record_memory 在插件内自动记录。全局库只收跨项目内容，项目专属内容只写入对应项目。'}
+                    'serverInfo': {'name': 'dragon_memory', 'title': TITLE, 'version': UPDATES.version},
+                    'instructions': ('用户要打开面板时用 open_panel。例行调用 recall_memory 和自动记录在后台完成。'
+                                     '普通新聊天直接回答用户，不以插件或技能名称开场。用户询问插件或记忆管理时按需说明。'
+                                     '对话中确认了新的长期偏好、约定或项目结论时，在本轮回复前用 record_memory 主动记录，传 automatic: true。'
+                                     '“我平时习惯……”或“以后每次都……”这类明确表达也适用，即使用户没有提到记忆或同时交代了其他任务。'
+                                     '全局自动记忆返回 action=review 时，在回复前比较候选并完成第二次调用：同义表述去重，同一偏好的补充整理成一条，'
+                                     '更正只替换冲突部分，独立偏好分别保存。保护带有「用户固定」标签的记忆，用户提出变更后须再次确认。'
+                                     '全局库只收跨项目内容，项目专属内容只写入对应项目。')}
         case 'ping':
             return {}
         case 'tools/list':
@@ -154,6 +184,7 @@ def request(method, params):
             if params.get('uri') != URI:
                 raise ValueError('未知应用资源。')
             html = (APP_DIR / 'panel.html').read_text(encoding='utf-8')
+            html = html.replace('DRAGON_PANEL_VERSION', UPDATES.version)
             html = html.replace('/* DRAGON_PANEL_CSS */', (APP_DIR / 'panel.css').read_text(encoding='utf-8'))
             html = html.replace('/* DRAGON_PANEL_JS */', (APP_DIR / 'panel.js').read_text(encoding='utf-8'))
             return {'contents': [{**RESOURCE, 'text': html, '_meta': {'ui': {'prefersBorder': False}}}]}
