@@ -24,4 +24,6 @@ codex plugin list --marketplace dragon-local --json
 
 安装结果以最后一条命令的 `installed` 列表为准。目标条目的 `installed` 和 `enabled` 均应为 `true`。
 
+首次安装后，可用面板上的「可更新」安装后续正式版本。详情见 [检查与安装更新](README.md#检查与安装更新)。
+
 私有仓库需要对应账户有读取权限。终端权限、Codex 或 Python 缺失时，GPT 应说明缺少的条件。对跨聊天自动记忆的工作流设置，请参阅 [README](README.md#让新聊天自动使用记忆)。
