@@ -12,6 +12,7 @@ from pathlib import Path
 
 # 全局库拒绝明显依赖当前项目的记录，范围判断仍以对话中的实际语义为准。
 PROJECT_REFERENCE = re.compile(r'(?:本|当前|这个|该)(?:项目|仓库|代码库)|\b(?:this|current)\s+(?:project|repo(?:sitory)?)\b', re.I)
+MEMORY_WORDS = re.compile(r'[\u3400-\u9fff]|[^\W_]+')
 
 
 def codex_home():
@@ -49,6 +50,48 @@ def memory_fields(title, body, tags):
     if len(title) > 120 or len(body) > 20000 or len(tags) > 400:
         raise ValueError('标题最多 120 字、正文最多 20,000 字、标签最多 400 字。')
     return title, body, tags
+
+
+def global_memory_fields(title, body, tags):
+    """规范化记忆内容，拒绝明显属于特定项目的全局条目。"""
+    fields = memory_fields(title, body, tags)
+    if any(PROJECT_REFERENCE.search(value) for value in fields):
+        raise ValueError('这条内容涉及特定项目，请存档到对应项目。')
+    return fields
+
+
+def memory_terms(text):
+    """提取词和相邻字组，为中文及混合语言的候选条目排序。"""
+    words = MEMORY_WORDS.findall(text.casefold())
+    return {word for word in words if len(word) > 1} | {
+        left + right for left, right in zip(words, words[1:])
+    }
+
+
+def fixed_memory(row):
+    """只按完整标签识别用户固定的记忆。"""
+    return '用户固定' in {tag.strip() for tag in re.split(r'[,，、]', row['tags'])}
+
+
+def review_memories(rows, title, body, tags, review_token):
+    """提供候选条目，由当前对话判断语义关系并整理最终正文。"""
+    terms = memory_terms(' '.join((title, body, tags)))
+    ranked = sorted(rows, key=lambda row: (
+        row['title'].casefold() == title.casefold(),
+        len(terms & memory_terms(row['title'])) * 2
+        + len(terms & memory_terms(' '.join((row['body'][:1500], row['tags'])))),
+    ), reverse=True)
+    candidates = [
+        {**row, 'body': row['body'][:600], 'body_truncated': len(row['body']) > 600, 'fixed': fixed_memory(row)}
+        for row in ranked[:16]
+    ]
+    return {'scope': 'global', 'action': 'review', 'review_token': review_token, 'candidates': candidates,
+            'instruction': ('尚未写入。先比较候选的适用场景和具体偏好。'
+                            '同一偏好保留仍适用的旧细节并写入新细节；明确更正只替换对应部分。'
+                            '原标题仍准确时沿用，标题中含被更正的细节时同步改成准确的主题标题。'
+                            '仅将确属同一条的自动记录 ID 按保留顺序填入 merge_ids，正文被截断时先按 ID 读全文。'
+                            '独立事项使用不同标题和空数组。手动或用户固定条目不能自动更改，内容已涵盖时无需写入。'
+                            '用户固定条目与新信息冲突时，不另存一条来覆盖它；由用户要求修改并确认后手动更新。')}
 
 
 class Store:
@@ -151,61 +194,111 @@ class Store:
                 for term in terms
             )]
 
-    def save_memory(self, title, body, tags='', *, key=None, revision=None, automatic=False):
-        """存入全局记忆。自动记录按主题去重，并保留用户手工编辑的版本。"""
-        title, body, tags = memory_fields(title, body, tags)
-        if any(PROJECT_REFERENCE.search(value) for value in (title, body, tags)):
-            raise ValueError('这条内容涉及特定项目，请存档到对应项目。')
-        updated = datetime.now(UTC).isoformat(timespec='microseconds')
-        origin = 'automatic' if automatic else 'manual'
+    def save_memory(self, title, body, tags='', *, key=None, revision=None, confirm_fixed=False):
+        """从管理面板或手动命令保存全局记忆，编辑时校验条目版本。"""
+        fields = global_memory_fields(title, body, tags)
         with closing(self.connect()) as db, db:
-            if automatic:
+            if key is not None:
                 db.execute('BEGIN IMMEDIATE')
-                if not self.auto_enabled(db):
-                    return None
-                previous = db.execute('''
-                    SELECT * FROM memory WHERE title = ? COLLATE NOCASE
-                    ORDER BY origin = 'manual' DESC, id DESC LIMIT 1
-                ''', (title,)).fetchone()
-                if previous:
-                    if previous['origin'] == 'manual' or previous['body'] == body:
-                        return dict(previous)
-                    key, revision = previous['id'], previous['revision']
-            values = (title, body, tags, updated, origin)
-            if key is None:
-                result = db.execute(
-                    'INSERT INTO memory (title, body, tags, updated, origin) VALUES (?, ?, ?, ?, ?)', values)
-                key = result.lastrowid
-            else:
-                result = db.execute('''
-                    UPDATE memory SET title = ?, body = ?, tags = ?, updated = ?, origin = ?, revision = revision + 1
-                    WHERE id = ? AND revision = ?
-                ''', (*values, key, revision))
-                if not result.rowcount:
-                    raise ValueError('这条记忆已被修改或删除。请重新加载后再保存。')
-            return dict(db.execute('SELECT * FROM memory WHERE id = ?', (key,)).fetchone())
+                self.check_fixed(db, key, revision, confirm_fixed)
+            return self.write_memory(db, fields, 'manual', key=key, revision=revision)
 
-    def delete_memory(self, key, revision):
+    @staticmethod
+    def check_fixed(db, key, revision, confirmed):
+        """校验将要编辑或删除的版本，防止确认后误改其他版本。"""
+        row = db.execute('SELECT tags FROM memory WHERE id = ? AND revision = ?', (key, revision)).fetchone()
+        if row and fixed_memory(row) and not confirmed:
+            raise ValueError('这条记忆带有「用户固定」标签，请先让用户确认本次修改。')
+
+    @staticmethod
+    def write_memory(db, fields, origin, *, key=None, revision=None):
+        """在调用方事务内统一写入条目，并返回实际保存的版本。"""
+        updated = datetime.now(UTC).isoformat(timespec='microseconds')
+        values = (*fields, updated, origin)
+        if key is None:
+            result = db.execute(
+                'INSERT INTO memory (title, body, tags, updated, origin) VALUES (?, ?, ?, ?, ?)', values)
+            key = result.lastrowid
+        else:
+            result = db.execute('''
+                UPDATE memory SET title = ?, body = ?, tags = ?, updated = ?, origin = ?, revision = revision + 1
+                WHERE id = ? AND revision = ?
+            ''', (*values, key, revision))
+            if not result.rowcount:
+                raise ValueError('这条记忆已被修改或删除。请重新加载后再保存。')
+        return dict(db.execute('SELECT * FROM memory WHERE id = ?', (key,)).fetchone())
+
+    def record_global(self, title, body, tags, *, review_token=None, merge_ids=None):
+        """有旧条目时先返回候选；提交时核对版本，并在一个事务内合并。"""
+        fields = global_memory_fields(title, body, tags)
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            if not self.auto_enabled(db):
+                return {'scope': 'global', 'item': None, 'skipped': True}
+            rows = [dict(row) for row in db.execute('SELECT * FROM memory ORDER BY updated DESC, id DESC')]
+            # 任一条目发生新增、编辑或删除，旧的比较结果都需要重新核对。
+            versions = ','.join(f"{row['id']}:{row['revision']}" for row in rows)
+            current = hashlib.sha256(versions.encode('ascii')).hexdigest()
+            if (rows or review_token is not None) and (review_token != current or merge_ids is None):
+                return review_memories(rows, *fields, current)
+            merge_ids = list(dict.fromkeys(merge_ids or ()))
+            by_id = {row['id']: row for row in rows}
+            if any(key not in by_id for key in merge_ids):
+                raise ValueError('所选记忆已不存在，请重新获取候选条目。')
+            related = [by_id[key] for key in merge_ids]
+            if any(fixed_memory(row) for row in related):
+                raise ValueError('「用户固定」记忆不能自动修改或合并。')
+            if any(row['origin'] == 'manual' for row in related):
+                raise ValueError('手动条目须经手动编辑。已涵盖的内容可跳过，补充事项请使用独立标题。')
+            # 合并沿用首条的 ID；标题可随更正更新，避免与新正文冲突。
+            kept = related[0] if related else None
+            final_title = fields[0]
+            if any(row['title'].casefold() == final_title.casefold() and row['id'] not in merge_ids for row in rows):
+                raise ValueError('存在未纳入比较的同标题条目，请核对候选或为独立事项换一个标题。')
+            if kept:
+                all_tags = '、'.join(row['tags'] for row in related if row['tags'])
+                merged_tags = memory_fields(final_title, fields[1], '、'.join((all_tags, fields[2])))[2]
+                updated = (final_title, fields[1], merged_tags)
+                item = kept if (kept['title'], kept['body'], kept['tags']) == updated else self.write_memory(
+                    db, updated, 'automatic', key=kept['id'], revision=kept['revision'])
+                db.executemany('DELETE FROM memory WHERE id = ?', ((key,) for key in merge_ids[1:]))
+            else:
+                item = self.write_memory(db, fields, 'automatic')
+            return {'scope': 'global', 'item': item, 'skipped': False}
+
+    def delete_memory(self, key, revision, *, confirm_fixed=False):
         """仅删除已核对过的那一版记忆。"""
         with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            self.check_fixed(db, key, revision, confirm_fixed)
             result = db.execute('DELETE FROM memory WHERE id = ? AND revision = ?', (key, revision))
             if not result.rowcount:
                 raise ValueError('这条记忆已被修改或删除。请重新加载后再操作。')
 
-    def recall(self, query='', project_root=None):
-        """向聊天提供有界的全局记忆和当前项目存档。"""
-        notes = self.search(query)[:8]
-        for note in notes:
-            if len(note['body']) > 800:
-                note['body'] = note['body'][:800] + '…'
+    def recall(self, query='', project_root=None, memory_ids=None):
+        """提供适用记忆；指定 ID 时读取候选条目的完整正文。"""
+        if memory_ids is not None:
+            if not 1 <= len(memory_ids) <= 5:
+                raise ValueError('一次可按 ID 读取 1 到 5 条全局记忆。')
+            wanted = set(memory_ids)
+            notes = [note for note in self.search() if note['id'] in wanted]
+        else:
+            notes = self.search(query)[:8]
+            for note in notes:
+                if len(note['body']) > 800:
+                    note['body'] = note['body'][:800] + '…'
         return {'automatic': self.automatic(), 'global': notes,
                 'project': self.project_context(project_root) if project_root else None}
 
-    def record(self, scope, title, body, tags='', *, project_root=None, automatic=False):
+    def record(self, scope, title, body, tags='', *, project_root=None, automatic=False,
+               review_token=None, merge_ids=None):
         """要求调用方明确范围。项目根目录不明时保留在本轮对话中。"""
+        if (review_token is not None or merge_ids is not None) and (scope != 'global' or not automatic):
+            raise ValueError('候选条目只用于全局自动记忆。')
         if scope == 'global' and project_root is None:
-            item = self.save_memory(title, body, tags, automatic=automatic)
-            return {'scope': scope, 'item': item, 'skipped': item is None}
+            if automatic:
+                return self.record_global(title, body, tags, review_token=review_token, merge_ids=merge_ids)
+            return {'scope': scope, 'item': self.save_memory(title, body, tags), 'skipped': False}
         if scope == 'project' and project_root:
             path = self.archive_project(project_root, title, body, tags, automatic=automatic)
             return {'scope': scope, 'path': str(path) if path else None, 'skipped': path is None}
