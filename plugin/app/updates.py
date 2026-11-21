@@ -1,5 +1,6 @@
 """从正式发布的 GitHub Release 检查并安装插件更新。"""
 
+import hashlib
 import io
 import json
 import os
@@ -11,6 +12,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import urllib.request
 import zipfile
 from contextlib import closing
@@ -24,6 +26,8 @@ PLUGIN_ID = f'dragon-memory@{MARKETPLACE}'
 MANIFEST = Path('.codex-plugin/plugin.json')
 CATALOG = Path('.agents/plugins/marketplace.json')
 VERSION = re.compile(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-dev\.([1-9][0-9]*))?')
+SNAPSHOT = re.compile(r'(.+)-(?:[0-9a-f]{40}|[0-9a-f]{64})')
+INCOMING = re.compile(r'\.incoming-[a-z0-9_]{8}')
 UNSAFE_PATH = re.compile(r'[\\:\x00-\x1f<>|"*?]|^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)', re.I)
 MAX_ARCHIVE = 16 * 1024 * 1024
 
@@ -75,6 +79,11 @@ def unpack_package(data, root, version):
             target.parent.mkdir(parents=True, exist_ok=True)
             with archive.open(entry) as source, target.open('xb') as destination:
                 shutil.copyfileobj(source, destination)
+    validate_package(root, version)
+
+
+def validate_package(root, version):
+    """核对解包或已保存的快照仍属于预期插件和版本。"""
     manifest = json.loads((root / 'plugin' / MANIFEST).read_text(encoding='utf-8'))
     catalog = json.loads((root / CATALOG).read_text(encoding='utf-8'))
     if (manifest.get('name') != 'dragon-memory' or manifest.get('version') != version
@@ -95,6 +104,7 @@ class Updates:
         self.installed = self.version
         self.home = store.home
         self.db_path = store.data_dir / 'updates.sqlite3'
+        self.marketplace_cache = store.data_dir / 'marketplace-snapshots'
         self.lock = threading.Lock()
         self.checked_at = 0
         self.checking = False
@@ -148,14 +158,18 @@ class Updates:
             self.checked_at = time.monotonic()
             self.checking = False
 
-    def cli(self, *args):
-        """使用 Codex 自带安装命令，沿用当前配置目录和插件标识。"""
+    def codex_command(self, *args):
+        """定位当前客户端的 Codex 命令。"""
         codex = shutil.which('codex')
         if not codex:
             raise ValueError('找不到 Codex CLI，无法安装更新。')
+        return [codex, *args]
+
+    def cli(self, *args):
+        """使用 Codex 自带安装命令，沿用当前配置目录和插件标识。"""
         try:
             result = subprocess.run(
-                [codex, 'plugin', *args, '--json'], check=True, capture_output=True, timeout=14,
+                self.codex_command('plugin', *args, '--json'), check=True, capture_output=True, timeout=14,
                 encoding='utf-8', env={**os.environ, 'CODEX_HOME': str(self.home)},
             )
         except (OSError, subprocess.SubprocessError) as error:
@@ -167,6 +181,166 @@ class Updates:
         entries = self.cli('list', '--marketplace', MARKETPLACE).get('installed', [])
         return next((entry['version'] for entry in entries
                      if entry.get('pluginId') == PLUGIN_ID and entry.get('enabled')), None)
+
+    def marketplace_source(self, *, allow_missing=False):
+        """读取已登记的本地安装源，避免迁移其他插件或管理策略。"""
+        path = self.home / 'config.toml'
+        config = tomllib.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+        entry = config.get('marketplaces', {}).get(MARKETPLACE, {})
+        if not entry and allow_missing:
+            return None
+        source = entry.get('source')
+        if entry.get('source_type') != 'local' or not isinstance(source, str) or not Path(source).is_absolute():
+            raise ValueError('当前插件由非本地市场管理，请通过原市场更新。')
+        catalog = Path(source) / CATALOG
+        if catalog.is_file():
+            plugins = json.loads(catalog.read_text(encoding='utf-8')).get('plugins', [])
+            if [plugin.get('name') for plugin in plugins] != ['dragon-memory']:
+                raise ValueError('当前市场同时管理其他插件，请通过原市场更新。')
+        return source
+
+    def set_marketplace_source(self, source):
+        """通过 Codex 配置接口持久保存单个市场的路径。"""
+        try:
+            with subprocess.Popen(
+                self.codex_command('app-server', '--listen', 'stdio://'), cwd=self.home,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                encoding='utf-8', env={**os.environ, 'CODEX_HOME': str(self.home)},
+            ) as process:
+                deadline = threading.Timer(10, process.kill)
+                deadline.start()
+
+                def request(message, response_id=None):
+                    """发送一条协议消息，并等待指定响应。"""
+                    process.stdin.write(json.dumps({'jsonrpc': '2.0', **message}) + '\n')
+                    process.stdin.flush()
+                    if response_id is None:
+                        return
+                    for line in process.stdout:
+                        reply = json.loads(line)
+                        if reply.get('id') == response_id:
+                            if 'error' in reply:
+                                break
+                            return
+                    raise ValueError('Codex 未确认已保存插件安装源。')
+
+                try:
+                    request({'id': 1, 'method': 'initialize', 'params': {
+                        'clientInfo': {'name': 'dragon-memory-updater', 'version': self.version},
+                    }}, 1)
+                    request({'method': 'initialized'})
+                    request({'id': 2, 'method': 'config/value/write', 'params': {
+                        'keyPath': f'marketplaces.{MARKETPLACE}.source',
+                        'value': source, 'mergeStrategy': 'replace',
+                    }}, 2)
+                finally:
+                    deadline.cancel()
+                    process.stdin.close()
+                    if process.poll() is None:
+                        process.terminate()
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+            raise ValueError('Codex 未能保存插件安装源。') from error
+        if Path(self.marketplace_source()).resolve() != Path(source).resolve():
+            raise ValueError('Codex 保存的插件安装源与安装包不一致。')
+
+    def stage_snapshot(self, version, identity, populate):
+        """在当前安装事务内生成新目录，验证完整后再启用。"""
+        self.marketplace_cache.mkdir(parents=True, exist_ok=True)
+        destination = self.marketplace_cache / f'{version}-{identity}'
+        if not destination.exists():
+            with tempfile.TemporaryDirectory(dir=self.marketplace_cache, prefix='.incoming-') as temp:
+                staged = Path(temp) / 'snapshot'
+                populate(staged)
+                validate_package(staged, version)
+                staged.rename(destination)
+        validate_package(destination, version)
+        return destination
+
+    def save_snapshot(self, commit, version):
+        """下载固定提交并把发布包保存为 Codex 的本地安装源。"""
+        try:
+            archive = fetch(f'https://codeload.github.com/{REPOSITORY}/zip/{commit}', MAX_ARCHIVE)
+            return self.stage_snapshot(version, commit, lambda staged: unpack_package(archive, staged, version))
+        except (OSError, RuntimeError, zipfile.BadZipFile) as error:
+            raise ValueError('无法读取或保存 GitHub 更新包。') from error
+
+    def install_local(self, package_root):
+        """首次安装以及从旧更新器迁移时，使用稳定的本地安装源。"""
+        version = self.version
+        validate_package(package_root, version)
+        paths = [CATALOG, *sorted(file.relative_to(package_root)
+                                 for file in (package_root / 'plugin').rglob('*')
+                                 if file.is_file() and '__pycache__' not in file.parts
+                                 and file.suffix not in ('.pyc', '.pyo'))]
+        digest = hashlib.sha256()
+        for relative in paths:
+            digest.update(relative.as_posix().encode('utf-8') + b'\0')
+            digest.update(hashlib.sha256((package_root / relative).read_bytes()).digest())
+
+        def copy_package(staged):
+            """复制发布包的清单和插件文件，旧版源码与数据留在原处。"""
+            for relative in paths:
+                target = staged / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(package_root / relative, target)
+
+        self.home.mkdir(parents=True, exist_ok=True)
+        with closing(self.connect()) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            previous = self.installed_version()
+            if previous and version_key(previous) > version_key(version):
+                return previous
+            destination = self.stage_snapshot(version, digest.hexdigest(), copy_package)
+            if self.marketplace_source(allow_missing=True) is None:
+                self.cli('marketplace', 'add', str(destination))
+                self.cli('add', PLUGIN_ID)
+                if self.installed_version() != version:
+                    raise ValueError('Codex 尚未确认新版本已启用。')
+            else:
+                self.activate_marketplace(destination, version)
+            self.cleanup_snapshots(destination)
+        return version
+
+    def cleanup_snapshots(self, active):
+        """只清理本插件生成的旧快照和未完成的暂存目录。"""
+        parent = self.marketplace_cache.resolve()
+        active = active.resolve()
+        try:
+            if (parent != self.db_path.parent.resolve() / 'marketplace-snapshots'
+                    or active.parent != parent or not Path(self.marketplace_source()).samefile(active)):
+                return
+            candidates = list(parent.iterdir())
+        except (OSError, ValueError):
+            return
+        for item in candidates:
+            match = SNAPSHOT.fullmatch(item.name)
+            if not (INCOMING.fullmatch(item.name) or (match and VERSION.fullmatch(match[1]))):
+                continue
+            try:
+                if item == active or not item.is_dir() or item.resolve() != item:
+                    continue
+                if match:
+                    validate_package(item, match[1])
+                shutil.rmtree(item)
+            except (OSError, ValueError, TypeError, AttributeError):
+                # Windows 或其他窗口尚在使用时，留待下次安装再清理。
+                continue
+
+    def activate_marketplace(self, destination, version):
+        """切换持久安装源并核对安装，失败时恢复原来源。"""
+        previous_source = self.marketplace_source()
+        desired_source = str(destination.resolve())
+        try:
+            self.set_marketplace_source(desired_source)
+            if self.installed_version() != version:
+                self.cli('add', PLUGIN_ID)
+            if self.installed_version() != version:
+                raise ValueError('Codex 尚未确认新版本已启用。')
+        except (OSError, ValueError, subprocess.SubprocessError):
+            current = Path(self.marketplace_source()).resolve()
+            if current == Path(desired_source) and current != Path(previous_source).resolve():
+                self.set_marketplace_source(previous_source)
+            raise
 
     def connect(self):
         """记录安装结果，更新时只锁更新记录库。"""
@@ -215,20 +389,12 @@ class Updates:
             if previous is None:
                 raise ValueError('Codex 尚未启用此插件，请先从插件页启用。')
             if version_key(previous) < version_key(version):
-                try:
-                    archive = fetch(f'https://codeload.github.com/{REPOSITORY}/zip/{commit}', MAX_ARCHIVE)
-                    with tempfile.TemporaryDirectory(prefix='dragon-memory-update-') as temp:
-                        unpack_package(archive, Path(temp), version)
-                        # 本次安装临时覆盖市场来源，保留用户原来的市场配置。
-                        source = json.dumps(Path(temp).as_posix(), ensure_ascii=False)
-                        self.cli('add', PLUGIN_ID, '-c', f'marketplaces.{MARKETPLACE}.source={source}')
-                except (OSError, RuntimeError, zipfile.BadZipFile) as error:
-                    raise ValueError('无法读取或安装 GitHub 更新包。') from error
-                if self.installed_version() != version:
-                    raise ValueError('Codex 尚未确认新版本已启用。')
+                snapshot = self.save_snapshot(commit, version)
+                self.activate_marketplace(snapshot, version)
                 db.execute('INSERT OR REPLACE INTO updates VALUES (?, ?, ?, ?)',
                            (version, previous, datetime.now(UTC).isoformat(), json.dumps(update['releases'], ensure_ascii=False)))
                 db.execute('DELETE FROM updates WHERE version NOT IN (SELECT version FROM updates ORDER BY installed_at DESC LIMIT 10)')
+                self.cleanup_snapshots(snapshot)
             else:
                 version = previous
         with self.lock:
