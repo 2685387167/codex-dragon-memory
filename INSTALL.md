@@ -31,3 +31,10 @@ codex plugin list --marketplace dragon-local --json
 首次安装后，可用面板上的「可更新」安装后续正式版本。详情见 [检查与安装更新](README.md#检查与安装更新)。
 
 私有仓库需要对应账户有读取权限。终端权限、Codex 或 Python 缺失时，GPT 应说明缺少的条件。对跨聊天自动记忆的工作流设置，请参阅 [README](README.md#让新聊天自动使用记忆)。
+
+## 常见问题
+
+### 更新按钮一直显示「重试检查」，更新记录为空
+
+1. 先确认 Codex 实际用哪个 Python 启动插件。Windows 上可以用 `Get-Command python -All` 列出候选。如果有多个 Python 环境，以 Codex 启动插件时使用的解释器为准。
+2. 再用该 Python 环境检查访问 GitHub API 时的 HTTPS 证书校验。修复证书问题后，重新打开 Codex，再点「重试检查」。
